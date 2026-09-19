@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <!-- Lets the .NET 8 SDK build Windows-only TFMs on Linux. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>DCTrayLite</AssemblyName>
+    <!-- We embed WebView2Loader.dll as a resource and LoadLibrary it ourselves,
+         so don't let the WebView2 package copy runtimes\ sidecars to the output. -->
+    <WebView2NeverCopyLoaderDllToOutputDirectory>true</WebView2NeverCopyLoaderDllToOutputDirectory>
+    <RootNamespace>DCTrayLite</RootNamespace>
+    <ApplicationIcon>assets/discord.ico</ApplicationIcon>
+    <Version>1.2.0</Version>
+    <!-- Keep the build quiet and deterministic. -->
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Reference assemblies for .NET Framework 4.8 (no Windows SDK needed). -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="All" />
+    <!-- WebView2: compile against it, but embed the DLLs ourselves for a single exe. -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+    <!-- For hotkeys.json persistence. -->
+    <Reference Include="System.Web.Extensions" />
+  </ItemGroup>
+
+  <!-- Embed the WebView2 managed + native binaries so the output is one file. -->
+  <ItemGroup>
+    <EmbeddedResource Include="$(PkgMicrosoft_Web_WebView2)\lib\net462\Microsoft.Web.WebView2.Core.dll">
+      <LogicalName>DCTrayLite.NativeLibs.Microsoft.Web.WebView2.Core.dll</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="$(PkgMicrosoft_Web_WebView2)\lib\net462\Microsoft.Web.WebView2.WinForms.dll">
+      <LogicalName>DCTrayLite.NativeLibs.Microsoft.Web.WebView2.WinForms.dll</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="$(PkgMicrosoft_Web_WebView2)\runtimes\win-x64\native\WebView2Loader.dll">
+      <LogicalName>DCTrayLite.NativeLibs.WebView2Loader.dll</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>

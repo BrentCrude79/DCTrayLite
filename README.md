@@ -2,7 +2,7 @@
 
 Discord in the system tray — without the Discord desktop app. A single ~1 MB
 executable that wraps the Discord web app in a lightweight window with a
-tray icon, global hotkeys, and a voice-state indicator.
+tray icon and system-level mic control.
 
 No installer. No Electron. Windows 10/11, WebView2-based (built into Windows).
 
@@ -19,43 +19,65 @@ That's the whole install — put it wherever you like.
 Log in with your Discord account on first launch. Your session is kept in a
 private per-app profile and won't touch your Chrome/Edge profiles.
 
+## How it works (v1.2+)
+
+Instead of trying to remote-control Discord's keybinds, the wrapper owns
+your **microphone at the OS level** (Core Audio, no extra drivers):
+
+- On launch it takes control of the mic — **starting muted** — and restores
+  whatever state it found when you quit.
+- **Discord itself stays on open mic** (Voice Activity). The wrapper decides
+  whether any sound reaches it.
+- Muting is system-wide while the wrapper is in charge: any app using the
+  default mic goes quiet too. That's the trade-off, and it's by design.
+- The tray icon mirrors the *wrapper's* mic state — no page scraping, so it
+  can't drift out of sync:
+
+| Icon | Meaning |
+|------|---------|
+| 🎙️ mic + red slash | Mic muted (wrapper) |
+| 🟢 green mic | Mic live (toggle on) |
+| 🟢 bright green mic | Push-to-talk key held — talking now |
+
+Hovering the tray icon also shows the state as text.
+
+## Discord setup (one time)
+
+1. Discord **User Settings → Voice & Video → Input Mode → Voice Activity**
+   (open mic). The wrapper is now your mute switch.
+2. **User Settings → Keybinds**: clear any Push To Talk / Toggle Mute binds
+   (or leave them — Discord's mic is gated by the wrapper either way, but
+   clearing avoids confusion).
+3. Pick an input device as usual; if you *change* mics later, restart
+   DCTrayLite so it re-binds to the new default.
+
+## Global hotkeys
+
+Push-to-talk and toggle-mute that work while the window isn't focused —
+mid-game, in another app, anywhere. Windows itself watches these
+(`RegisterHotKey`), so a bind taken by another app tells you instead of
+failing silently.
+
+1. Right-click the tray icon → **Hotkeys…**
+2. Click **Set…** on a row, hold the modifiers (**Ctrl / Alt / Shift**) and
+   tap **one** key — e.g. `Ctrl + Alt + M`. Esc cancels. (Up to 3.)
+3. Pick what it does: **Push-to-talk** (mic open while held) or
+   **Toggle mute** (flips on/off per press).
+4. OK. No matching setup needed inside Discord.
+
+Keys are never swallowed: they still reach whatever app is in front, exactly
+like the native client's global binds.
+
+You can also flip the mic from the tray menu (*Mute mic / Unmute mic*) —
+same as the toggle hotkey, for mouse users.
+
 ## Tray behavior
 
 - Closing or minimizing the window hides it to the tray instead of quitting.
 - Double-click the tray icon (or right-click → *Open DCTrayLite*) to show it.
-- Right-click → *Quit* to exit for real.
+- Right-click → *Quit* to exit for real (mic state is restored first).
 - *Start with Windows* toggles a startup entry (HKCU Run).
-
-## Global hotkeys
-
-The one desktop-app feature worth keeping: **push-to-talk and mute toggles
-that work while the window isn't focused** — mid-game, in another app, anywhere.
-
-1. Right-click the tray icon → **Hotkeys…**
-2. Click **Set…** on a row, hold the keys together, then release.
-   Each hotkey can be a combo — e.g. Left Ctrl + Left Alt, or
-   Ctrl + Shift + M. Esc cancels. (Up to 3.)
-3. **Mark it as Push-to-talk** in the dropdown if it's a hold-to-talk key.
-4. In Discord itself, set the **same** combos: User Settings → Keybinds →
-   add *Push To Talk* / *Toggle Mute* with the same physical keys.
-
-DCTrayLite only delivers the keystrokes — Discord decides what they do, so
-both sides have to agree on the key. Keys are never swallowed: they still
-reach whatever app is in front, exactly like the native client's global binds.
-
-## Voice-state tray icon
-
-The tray icon mirrors your voice state live (read from Discord's own
-controls, so it stays in sync):
-
-| Icon | Meaning |
-|------|---------|
-| 🔵 navy mic | Not in a voice channel |
-| 🟢 green mic | Mic live |
-| 🎙️ mic + red slash | Muted (or deafened) |
-| 🟢 bright green mic | Push-to-talk key held — talking now |
-
-Hovering the tray icon also shows the state as text.
+- Second launch just shows the running instance — it never errors.
 
 ## Files & data
 
@@ -63,8 +85,18 @@ Hovering the tray icon also shows the state as text.
 - To fully remove: quit the app, delete the exe, and optionally delete that
   folder and the `DCTrayLite` value under `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run`.
 
+## Source
+
+`src/` holds the full C# source (net48 WinForms, cross-compiled with the
+.NET 8 SDK). The mic gate is `MicController.cs` (Core Audio COM interop,
+hand-declared — no packages); global hotkeys are `Hotkeys.cs` +
+`HotkeyConfigDialog.cs`. Build with `dotnet build src/DCTrayLite.csproj -c
+Release`, then stamp the config overlay + icon the way
+[PwaTrayGen](https://github.com/BrentCrude79/pwatraygen) does.
+
 ## Built with
 
 Generated by [PwaTrayGen](https://github.com/BrentCrude79/pwatraygen) —
-a tool that turns any PWA shortcut into a single-exe tray app. DCTrayLite is
-the reference build: Discord PWA + tray + global hotkeys + voice-state icon.
+a tool that turns any PWA shortcut into a single-exe tray app. DCTrayLite
+started as its reference build and grew its own mic-control design; `src/`
+is that fork.
