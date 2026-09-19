@@ -40,7 +40,7 @@ namespace DCTrayLite
             for (int i = 0; i < MaxBindings; i++)
                 if (Bindings[i] == null) Bindings[i] = new HotkeyBinding();
 
-            Text = "Global Hotkeys (v1.3.3)";
+            Text = "Global Hotkeys (v1.3.4)";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;

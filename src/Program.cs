@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -100,6 +101,29 @@ namespace DCTrayLite
                 return;
             }
 
+            // Cross-tag backstop: a sibling copy with a different config
+            // name (e.g. the original Discord-Tray.exe) uses different
+            // mutex names, so the mutex check above can't see it. If an
+            // EARLIER sibling process exists, hand off to it instead of
+            // doubling up. (StartTime comparison keeps two simultaneous
+            // starters from both exiting.)
+            Process sibling = FindEarlierSiblingProcess();
+            if (sibling != null)
+            {
+                string sibPath = null;
+                try { sibPath = sibling.MainModule.FileName; } catch { }
+                bool signaled = SignalAllKnownEvents(tag);
+                if (!signaled)
+                {
+                    MessageBox.Show(cfg.Name + " is already running (" +
+                        (sibPath ?? "another copy") + ") — check the system tray.",
+                        cfg.Name, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                try { if (globalMutex != null) globalMutex.Close(); } catch { }
+                try { mutex.Close(); } catch { }
+                return;
+            }
+
             // Create the show-events NOW, while we hold the mutex and before
             // the main form exists — a second instance (e.g. a taskbar-pin
             // click) can then always signal us, even mid-startup. Clear any
@@ -126,6 +150,64 @@ namespace DCTrayLite
                 return ev;
             }
             catch { return null; }
+        }
+
+        /// <summary>
+        /// Finds a running sibling copy from the DCTrayLite family that
+        /// started before this process (different exe name / config tag, so
+        /// the mutex check can't see it). Null when we're the earliest.
+        /// </summary>
+        static Process FindEarlierSiblingProcess()
+        {
+            Process self = Process.GetCurrentProcess();
+            DateTime selfStart;
+            try { selfStart = self.StartTime; }
+            catch { selfStart = DateTime.MaxValue; }
+            Process found = null;
+            foreach (var p in Process.GetProcesses())
+            {
+                try
+                {
+                    if (p.Id == self.Id) continue;
+                    string n = p.ProcessName;
+                    if (!(n.StartsWith("DCTrayLite", StringComparison.OrdinalIgnoreCase) ||
+                          n.StartsWith("Discord-Tray", StringComparison.OrdinalIgnoreCase)))
+                        continue;
+                    DateTime ost;
+                    try { ost = p.StartTime; } catch { continue; }
+                    if (ost < selfStart) { found = p; break; }
+                }
+                catch { }
+            }
+            return found;
+        }
+
+        /// <summary>
+        /// Signals the show-event for every known config tag in both
+        /// namespaces. Returns true if any running instance was signaled.
+        /// </summary>
+        static bool SignalAllKnownEvents(string ownTag)
+        {
+            string[] tags = { ownTag, "DCTrayLite", "Discord" };
+            string[] nss = { "Local", "Global" };
+            for (int i = 0; i < 20; i++)
+            {
+                foreach (var t in tags)
+                    foreach (var ns in nss)
+                    {
+                        try
+                        {
+                            using (var ev = EventWaitHandle.OpenExisting(ns + @"\PwaTrayShow_" + t))
+                            {
+                                ev.Set();
+                                return true;
+                            }
+                        }
+                        catch { }
+                    }
+                Thread.Sleep(100);
+            }
+            return false;
         }
 
         /// <summary>

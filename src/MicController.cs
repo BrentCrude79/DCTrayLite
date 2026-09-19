@@ -81,10 +81,23 @@ namespace DCTrayLite
             Guid clsid = CLSID_MMDeviceEnumerator, iid = IID_IMMDeviceEnumerator;
             IntPtr enumPtr;
             int hr = CoCreateInstance(ref clsid, IntPtr.Zero, CLSCTX_ALL, ref iid, out enumPtr);
-            if (hr != 0 || enumPtr == IntPtr.Zero)
-                throw new Exception("Could not reach the Windows audio system (0x" + hr.ToString("X8") + ").");
-            var enumerator = (IMMDeviceEnumerator)Marshal.GetTypedObjectForIUnknown(
-                enumPtr, typeof(IMMDeviceEnumerator));
+            IMMDeviceEnumerator enumerator;
+            if (hr == 0 && enumPtr != IntPtr.Zero)
+            {
+                enumerator = (IMMDeviceEnumerator)Marshal.GetTypedObjectForIUnknown(
+                    enumPtr, typeof(IMMDeviceEnumerator));
+            }
+            else
+            {
+                // P/Invoke activation failed — probe CLR activation as a
+                // fallback, and report both outcomes so a failure message
+                // pinpoints whether this is app-specific or system-wide.
+                string activatorError;
+                enumerator = TryActivatorEnumerator(out activatorError);
+                if (enumerator == null)
+                    throw new Exception("Could not reach the Windows audio system (0x" +
+                        hr.ToString("X8") + "; activator: " + activatorError + ").");
+            }
             try
             {
                 IntPtr devPtr;
@@ -175,6 +188,29 @@ namespace DCTrayLite
         }
 
         // ---- Core Audio COM declarations (vtable order matters) ----
+
+        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+        class MMDeviceEnumeratorClass { }
+
+        /// <summary>
+        /// Fallback activation probe: lets the CLR do CoCreateInstance +
+        /// cast instead of the direct P/Invoke. Returns null (with the error)
+        /// when activation fails this way too.
+        /// </summary>
+        static IMMDeviceEnumerator TryActivatorEnumerator(out string error)
+        {
+            try
+            {
+                var o = (IMMDeviceEnumerator)new MMDeviceEnumeratorClass();
+                error = null;
+                return o;
+            }
+            catch (Exception ex)
+            {
+                error = ex.GetType().Name + ": " + ex.Message;
+                return null;
+            }
+        }
 
         [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E"),
          InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
