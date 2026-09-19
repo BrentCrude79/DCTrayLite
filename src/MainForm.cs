@@ -345,23 +345,28 @@ namespace DCTrayLite
 
         void StartShowWatcher()
         {
-            // The show-event is created in Program.Main before this form
+            // The show-events are created in Program.Main before this form
             // exists, so a second instance can always signal us — even
-            // mid-startup. The loop never dies: a failed invoke must not
-            // break the single-instance handoff.
+            // mid-startup. Listens on both namespaces: current builds use
+            // Local\, older ones signal Global\. The loop never dies: a
+            // failed invoke must not break the single-instance handoff.
             var t = new Thread(() =>
             {
                 try
                 {
-                    using (var ev = EventWaitHandle.OpenExisting(@"Local\PwaTrayShow_" + _tag))
+                    var handles = new List<EventWaitHandle>();
+                    foreach (var name in new[] { @"Local\PwaTrayShow_" + _tag, @"Global\PwaTrayShow_" + _tag })
                     {
-                        while (!IsDisposed)
-                        {
-                            ev.WaitOne();
-                            if (IsDisposed) return;
-                            try { BeginInvoke((Action)ShowApp); }
-                            catch { }
-                        }
+                        try { handles.Add(EventWaitHandle.OpenExisting(name)); } catch { }
+                    }
+                    if (handles.Count == 0) return;
+                    var arr = handles.ToArray();
+                    while (!IsDisposed)
+                    {
+                        WaitHandle.WaitAny(arr);
+                        if (IsDisposed) return;
+                        try { BeginInvoke((Action)ShowApp); }
+                        catch { }
                     }
                 }
                 catch { }

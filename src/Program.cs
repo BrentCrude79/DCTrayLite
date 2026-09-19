@@ -8,9 +8,11 @@ namespace DCTrayLite
 {
     static class Program
     {
-        // Show-event for the single-instance handoff, created in Main while
-        // we hold the mutex. Lives for the whole process lifetime.
-        static EventWaitHandle _showEvent;
+        // Show-events for the single-instance handoff, created in Main while
+        // we hold the mutex. Live for the whole process lifetime. Both
+        // namespaces are used: Local\ is the current one, Global\ is kept
+        // so older builds (which used Global\) still hand off correctly.
+        static EventWaitHandle _showEventLocal, _showEventGlobal;
 
         [STAThread]
         static void Main()
@@ -30,22 +32,26 @@ namespace DCTrayLite
             }
 
             string tag = Sanitize(cfg.Name);
+            string localMutexName = @"Local\PwaTray_" + tag;
+            string globalMutexName = @"Global\PwaTray_" + tag;
 
-            // Single instance per user session (Local\, not Global\ — a per-user
-            // tray app has no business in the global namespace, and creating
-            // Global\ objects can fail for non-elevated callers).
+            // Single instance per user session. The Local\ mutex is the
+            // current one; the Global\ mutex is also taken (best effort —
+            // creating Global\ objects can fail for non-elevated callers)
+            // so that older builds, which used Global\, still see us and
+            // hand off instead of starting a second instance.
             bool createdNew;
             Mutex mutex;
             try
             {
-                mutex = new Mutex(true, @"Local\PwaTray_" + tag, out createdNew);
+                mutex = new Mutex(true, localMutexName, out createdNew);
             }
             catch (AbandonedMutexException)
             {
                 // Previous instance was killed (taskkill, crash) without
                 // releasing the mutex. It's signaled now — take ownership
                 // as the first instance instead of erroring out.
-                mutex = new Mutex(true, @"Local\PwaTray_" + tag, out createdNew);
+                mutex = new Mutex(true, localMutexName, out createdNew);
                 createdNew = true;
             }
             catch (Exception ex)
@@ -66,20 +72,43 @@ namespace DCTrayLite
                 return;
             }
 
-            // Create the show-event NOW, while we hold the mutex and before
+            // We hold Local\. An older-version instance may hold Global\ —
+            // try to take it: if it's already owned, the old instance is
+            // running and we hand off to it instead of doubling up.
+            Mutex globalMutex = null;
+            bool globalNew = true;
+            try
+            {
+                globalMutex = new Mutex(true, globalMutexName, out globalNew);
+            }
+            catch (AbandonedMutexException)
+            {
+                globalMutex = new Mutex(true, globalMutexName, out globalNew);
+                globalNew = true; // predecessor died; we take it
+            }
+            catch
+            {
+                globalMutex = null; // can't create Global\ here — Local\ is enough
+            }
+
+            if (!globalNew)
+            {
+                try { SignalExistingInstance(tag, cfg.Name); }
+                catch { }
+                try { globalMutex.Close(); } catch { }
+                try { mutex.Close(); } catch { }
+                return;
+            }
+
+            // Create the show-events NOW, while we hold the mutex and before
             // the main form exists — a second instance (e.g. a taskbar-pin
             // click) can then always signal us, even mid-startup. Clear any
             // stale signal left by a killed predecessor.
-            try
-            {
-                bool evNew;
-                _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset,
-                    @"Local\PwaTrayShow_" + tag, out evNew);
-                if (!evNew) _showEvent.Reset();
-            }
-            catch { _showEvent = null; }
+            _showEventLocal = CreateShowEvent(@"Local\PwaTrayShow_" + tag);
+            _showEventGlobal = CreateShowEvent(@"Global\PwaTrayShow_" + tag);
 
             using (mutex)
+            using (globalMutex)
             {
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
@@ -87,24 +116,41 @@ namespace DCTrayLite
             }
         }
 
+        static EventWaitHandle CreateShowEvent(string name)
+        {
+            try
+            {
+                bool evNew;
+                var ev = new EventWaitHandle(false, EventResetMode.AutoReset, name, out evNew);
+                if (!evNew) ev.Reset();
+                return ev;
+            }
+            catch { return null; }
+        }
+
         /// <summary>
-        /// Tells the running instance to show its window. Retries briefly —
-        /// the first instance may still be starting up. Falls back to a plain
-        /// message instead of dying silently.
+        /// Tells the running instance to show its window. Tries the Local\
+        /// event first, then the Global\ one (older builds listen there).
+        /// Retries briefly — the first instance may still be starting up.
+        /// Falls back to a plain message instead of dying silently.
         /// </summary>
         static void SignalExistingInstance(string tag, string appName)
         {
+            string[] events = { @"Local\PwaTrayShow_" + tag, @"Global\PwaTrayShow_" + tag };
             for (int i = 0; i < 20; i++)
             {
-                try
+                foreach (var name in events)
                 {
-                    using (var ev = EventWaitHandle.OpenExisting(@"Local\PwaTrayShow_" + tag))
+                    try
                     {
-                        ev.Set();
-                        return;
+                        using (var ev = EventWaitHandle.OpenExisting(name))
+                        {
+                            ev.Set();
+                            return;
+                        }
                     }
+                    catch { }
                 }
-                catch { }
                 Thread.Sleep(100);
             }
             MessageBox.Show(appName + " is already running — check the system tray.",

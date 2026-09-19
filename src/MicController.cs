@@ -11,6 +11,11 @@ namespace DCTrayLite
     /// voice activity, and this class decides whether any sound reaches it
     /// (mic) or reaches the user (speakers, for deafen). Muting here is
     /// system-wide — that is by design and accepted.
+    ///
+    /// Activation note: the enumerator is created with CoCreateInstance
+    /// asking directly for IID_IMMDeviceEnumerator, and every returned
+    /// interface pointer is wrapped with Marshal.GetTypedObjectForIUnknown —
+    /// no cast-based QueryInterface is ever used.
     /// </summary>
     sealed class MicController : IDisposable
     {
@@ -18,10 +23,18 @@ namespace DCTrayLite
         const int EDataFlow_Capture = 1;
         const int ERole_Console = 0;          // eConsole
         const int ERole_Communications = 2;   // eCommunications
-        const int CLSCTX_ALL = 23;
+        const uint CLSCTX_ALL = 23;
 
+        static readonly Guid CLSID_MMDeviceEnumerator =
+            new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
+        static readonly Guid IID_IMMDeviceEnumerator =
+            new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
         static readonly Guid IID_IAudioEndpointVolume =
             new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+
+        [DllImport("ole32.dll")]
+        static extern int CoCreateInstance(ref Guid rclsid, IntPtr pUnkOuter,
+            uint dwClsContext, ref Guid riid, out IntPtr ppv);
 
         sealed class Endpoint
         {
@@ -40,25 +53,18 @@ namespace DCTrayLite
         {
             try
             {
-                var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
-                try
-                {
-                    // Mute both the default capture device and the default
-                    // communications capture device — usually the same mic,
-                    // but muting both covers apps (like Discord) that bind
-                    // to the comms role specifically.
-                    foreach (int role in new[] { ERole_Console, ERole_Communications })
-                        AddEndpoint(enumerator, EDataFlow_Capture, role, _mics);
-                    // Speakers (for deafen): default render endpoint. The
-                    // console role covers normal playback; most systems
-                    // route comms audio to the same device.
-                    AddEndpoint(enumerator, EDataFlow_Render, ERole_Console, _speakers);
-                }
-                finally
-                {
-                    Marshal.ReleaseComObject(enumerator);
-                }
-                if (_mics.Count == 0)
+                // Mute both the default capture device and the default
+                // communications capture device — usually the same mic,
+                // but covering both catches apps (like Discord) that bind
+                // to the comms role specifically.
+                foreach (int role in new[] { ERole_Console, ERole_Communications })
+                    AddEndpoint(EDataFlow_Capture, role, _mics);
+                // Speakers (for deafen): default render endpoint. The
+                // console role covers normal playback; most systems route
+                // comms audio to the same device.
+                AddEndpoint(EDataFlow_Render, ERole_Console, _speakers);
+
+                if (_mics.Count == 0 && Error == null)
                     Error = "No microphone capture endpoint was found.";
                 // No speakers is not fatal — deafen just won't mute output.
             }
@@ -68,31 +74,47 @@ namespace DCTrayLite
             }
         }
 
-        void AddEndpoint(IMMDeviceEnumerator enumerator, int flow, int role, List<Endpoint> list)
+        void AddEndpoint(int flow, int role, List<Endpoint> list)
         {
-            IMMDevice device = null;
+            // Ask COM directly for the interface we want — the returned
+            // pointer is wrapped as-is, no QueryInterface involved.
+            Guid clsid = CLSID_MMDeviceEnumerator, iid = IID_IMMDeviceEnumerator;
+            IntPtr enumPtr;
+            int hr = CoCreateInstance(ref clsid, IntPtr.Zero, CLSCTX_ALL, ref iid, out enumPtr);
+            if (hr != 0 || enumPtr == IntPtr.Zero)
+                throw new Exception("Could not reach the Windows audio system (0x" + hr.ToString("X8") + ").");
+            var enumerator = (IMMDeviceEnumerator)Marshal.GetTypedObjectForIUnknown(
+                enumPtr, typeof(IMMDeviceEnumerator));
             try
             {
-                int hr = enumerator.GetDefaultAudioEndpoint(flow, role, out device);
-                if (hr != 0 || device == null) return;
-                object ep;
-                Guid iid = IID_IAudioEndpointVolume;
-                hr = device.Activate(ref iid, CLSCTX_ALL, IntPtr.Zero, out ep);
-                var vol = ep as IAudioEndpointVolume;
-                if (hr != 0 || vol == null)
+                IntPtr devPtr;
+                hr = enumerator.GetDefaultAudioEndpoint(flow, role, out devPtr);
+                if (hr != 0 || devPtr == IntPtr.Zero) return; // no default device for this flow/role
+                var device = (IMMDevice)Marshal.GetTypedObjectForIUnknown(
+                    devPtr, typeof(IMMDevice));
+                try
                 {
-                    if (ep != null) Marshal.ReleaseComObject(ep);
-                    return;
+                    Guid iidVol = IID_IAudioEndpointVolume;
+                    IntPtr volPtr;
+                    hr = device.Activate(ref iidVol, (int)CLSCTX_ALL, IntPtr.Zero, out volPtr);
+                    if (hr != 0 || volPtr == IntPtr.Zero)
+                        throw new Exception("Could not open the volume control (0x" + hr.ToString("X8") + ").");
+                    var vol = (IAudioEndpointVolume)Marshal.GetTypedObjectForIUnknown(
+                        volPtr, typeof(IAudioEndpointVolume));
+                    bool muted;
+                    if (vol.GetMute(out muted) == 0)
+                        list.Add(new Endpoint { Vol = vol, InitialMute = muted });
+                    else
+                        Marshal.ReleaseComObject(vol);
                 }
-                bool muted;
-                if (vol.GetMute(out muted) == 0)
-                    list.Add(new Endpoint { Vol = vol, InitialMute = muted });
-                else
-                    Marshal.ReleaseComObject(ep);
+                finally
+                {
+                    Marshal.ReleaseComObject(device);
+                }
             }
             finally
             {
-                if (device != null) Marshal.ReleaseComObject(device);
+                Marshal.ReleaseComObject(enumerator);
             }
         }
 
@@ -154,26 +176,22 @@ namespace DCTrayLite
 
         // ---- Core Audio COM declarations (vtable order matters) ----
 
-        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
-        class MMDeviceEnumerator { }
-
-        [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E"),
+        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E"),
          InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         interface IMMDeviceEnumerator
         {
             [PreserveSig] int EnumAudioEndpoints(int dataFlow, int dwStateMask, out IntPtr ppDevices);
-            [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice ppEndpoint);
+            [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IntPtr ppDevice);
         }
 
-        [Guid("D666063F-1587-4E43-81F1-D9502C68A1E0"),
+        [ComImport, Guid("D666063F-1587-4E43-81F1-D9502C68A1E0"),
          InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         interface IMMDevice
         {
-            [PreserveSig] int Activate(ref Guid iid, int dwClsCtx, IntPtr pActivationParams,
-                [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
+            [PreserveSig] int Activate(ref Guid iid, int dwClsCtx, IntPtr pActivationParams, out IntPtr ppInterface);
         }
 
-        [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"),
+        [ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"),
          InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         interface IAudioEndpointVolume
         {
