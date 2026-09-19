@@ -4,12 +4,13 @@ using System.Windows.Forms;
 
 namespace DCTrayLite
 {
-    /// <summary>What a hotkey does to the wrapper-controlled mic.</summary>
+    /// <summary>What a hotkey does to the wrapper-controlled audio.</summary>
     static class HotkeyAction
     {
         public const int None = 0;
         public const int PushToTalk = 1; // mic open while the combo is held
-        public const int Toggle = 2;     // flips the mic on/off per press
+        public const int ToggleMute = 2; // flips the mic on/off per press
+        public const int ToggleDeafen = 3; // flips deafen (mic + speakers) per press
     }
 
     /// <summary>

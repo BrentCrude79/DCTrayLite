@@ -5,17 +5,17 @@ using System.Runtime.InteropServices;
 namespace DCTrayLite
 {
     /// <summary>
-    /// Mutes/unmutes the system microphone(s) through the Core Audio API.
-    /// Hand-declared COM interop — no extra packages. This is the whole
-    /// point of the wrapper: Discord stays on open mic / voice activity,
-    /// and this class decides whether any sound reaches it. The tray icon
-    /// mirrors this wrapper-side state, never the page.
-    /// Muting here is system-wide (any app using the default mic goes
-    /// quiet) — that is by design and accepted.
+    /// Mutes/unmutes the system microphone(s) and speakers through the
+    /// Core Audio API. Hand-declared COM interop — no extra packages.
+    /// This is the whole point of the wrapper: Discord stays on open mic /
+    /// voice activity, and this class decides whether any sound reaches it
+    /// (mic) or reaches the user (speakers, for deafen). Muting here is
+    /// system-wide — that is by design and accepted.
     /// </summary>
     sealed class MicController : IDisposable
     {
-        const int EDataFlow_Capture = 1;      // eCapture
+        const int EDataFlow_Render = 0;
+        const int EDataFlow_Capture = 1;
         const int ERole_Console = 0;          // eConsole
         const int ERole_Communications = 2;   // eCommunications
         const int CLSCTX_ALL = 23;
@@ -23,8 +23,14 @@ namespace DCTrayLite
         static readonly Guid IID_IAudioEndpointVolume =
             new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
 
-        readonly List<IAudioEndpointVolume> _endpoints = new List<IAudioEndpointVolume>();
-        readonly List<bool> _initialMute = new List<bool>();
+        sealed class Endpoint
+        {
+            public IAudioEndpointVolume Vol;
+            public bool InitialMute;
+        }
+
+        readonly List<Endpoint> _mics = new List<Endpoint>();
+        readonly List<Endpoint> _speakers = new List<Endpoint>();
         bool _disposed;
 
         /// <summary>Null when the controller initialized cleanly.</summary>
@@ -42,46 +48,19 @@ namespace DCTrayLite
                     // but muting both covers apps (like Discord) that bind
                     // to the comms role specifically.
                     foreach (int role in new[] { ERole_Console, ERole_Communications })
-                    {
-                        IMMDevice device = null;
-                        try
-                        {
-                            int hr = enumerator.GetDefaultAudioEndpoint(
-                                EDataFlow_Capture, role, out device);
-                            if (hr != 0 || device == null) continue;
-                            object ep;
-                            Guid iid = IID_IAudioEndpointVolume;
-                            hr = device.Activate(ref iid,
-                                CLSCTX_ALL, IntPtr.Zero, out ep);
-                            var vol = ep as IAudioEndpointVolume;
-                            if (hr != 0 || vol == null)
-                            {
-                                if (ep != null) Marshal.ReleaseComObject(ep);
-                                continue;
-                            }
-                            bool muted;
-                            if (vol.GetMute(out muted) == 0)
-                            {
-                                _endpoints.Add(vol);
-                                _initialMute.Add(muted);
-                            }
-                            else
-                            {
-                                Marshal.ReleaseComObject(ep);
-                            }
-                        }
-                        finally
-                        {
-                            if (device != null) Marshal.ReleaseComObject(device);
-                        }
-                    }
+                        AddEndpoint(enumerator, EDataFlow_Capture, role, _mics);
+                    // Speakers (for deafen): default render endpoint. The
+                    // console role covers normal playback; most systems
+                    // route comms audio to the same device.
+                    AddEndpoint(enumerator, EDataFlow_Render, ERole_Console, _speakers);
                 }
                 finally
                 {
                     Marshal.ReleaseComObject(enumerator);
                 }
-                if (_endpoints.Count == 0)
+                if (_mics.Count == 0)
                     Error = "No microphone capture endpoint was found.";
+                // No speakers is not fatal — deafen just won't mute output.
             }
             catch (Exception ex)
             {
@@ -89,23 +68,66 @@ namespace DCTrayLite
             }
         }
 
-        public void SetMuted(bool muted)
+        void AddEndpoint(IMMDeviceEnumerator enumerator, int flow, int role, List<Endpoint> list)
+        {
+            IMMDevice device = null;
+            try
+            {
+                int hr = enumerator.GetDefaultAudioEndpoint(flow, role, out device);
+                if (hr != 0 || device == null) return;
+                object ep;
+                Guid iid = IID_IAudioEndpointVolume;
+                hr = device.Activate(ref iid, CLSCTX_ALL, IntPtr.Zero, out ep);
+                var vol = ep as IAudioEndpointVolume;
+                if (hr != 0 || vol == null)
+                {
+                    if (ep != null) Marshal.ReleaseComObject(ep);
+                    return;
+                }
+                bool muted;
+                if (vol.GetMute(out muted) == 0)
+                    list.Add(new Endpoint { Vol = vol, InitialMute = muted });
+                else
+                    Marshal.ReleaseComObject(ep);
+            }
+            finally
+            {
+                if (device != null) Marshal.ReleaseComObject(device);
+            }
+        }
+
+        public void SetMicMuted(bool muted)
         {
             if (_disposed) return;
-            foreach (var ep in _endpoints)
+            foreach (var e in _mics)
             {
-                try { ep.SetMute(muted, IntPtr.Zero); }
+                try { e.Vol.SetMute(muted, IntPtr.Zero); }
                 catch { }
             }
         }
 
-        /// <summary>Restores the mute state from before the wrapper took over.</summary>
+        public void SetSpeakersMuted(bool muted)
+        {
+            if (_disposed) return;
+            foreach (var e in _speakers)
+            {
+                try { e.Vol.SetMute(muted, IntPtr.Zero); }
+                catch { }
+            }
+        }
+
+        /// <summary>Restores mic + speaker mute state from before the wrapper took over.</summary>
         public void Restore()
         {
             if (_disposed) return;
-            for (int i = 0; i < _endpoints.Count; i++)
+            foreach (var e in _mics)
             {
-                try { _endpoints[i].SetMute(_initialMute[i], IntPtr.Zero); }
+                try { e.Vol.SetMute(e.InitialMute, IntPtr.Zero); }
+                catch { }
+            }
+            foreach (var e in _speakers)
+            {
+                try { e.Vol.SetMute(e.InitialMute, IntPtr.Zero); }
                 catch { }
             }
         }
@@ -116,12 +138,18 @@ namespace DCTrayLite
             _disposed = true;
             try { Restore(); }
             catch { }
-            foreach (var ep in _endpoints)
+            foreach (var e in _mics)
             {
-                try { Marshal.ReleaseComObject(ep); }
+                try { Marshal.ReleaseComObject(e.Vol); }
                 catch { }
             }
-            _endpoints.Clear();
+            foreach (var e in _speakers)
+            {
+                try { Marshal.ReleaseComObject(e.Vol); }
+                catch { }
+            }
+            _mics.Clear();
+            _speakers.Clear();
         }
 
         // ---- Core Audio COM declarations (vtable order matters) ----

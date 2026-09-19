@@ -16,10 +16,11 @@ using Microsoft.Web.WebView2.WinForms;
 namespace DCTrayLite
 {
     /// <summary>
-    /// Discord in a tray window. The wrapper owns the microphone at the OS
-    /// level: it starts muted and only unmutes while a push-to-talk hotkey
-    /// is held or the toggle is on. Discord itself stays on open mic /
-    /// voice activity — no Discord keybinds needed, no page scraping.
+    /// Discord in a tray window. The wrapper owns the mic AND speakers at
+    /// the OS level: the mic starts muted and only unmutes while a
+    /// push-to-talk hotkey is held or the mute toggle is on; the deafen
+    /// toggle additionally mutes the speakers. Discord itself stays on
+    /// open mic / voice activity — no Discord keybinds, no page scraping.
     /// </summary>
     sealed class MainForm : Form
     {
@@ -28,17 +29,20 @@ namespace DCTrayLite
         readonly WebView2 _web;
         readonly NotifyIcon _tray;
         readonly ToolStripMenuItem _muteItem;
+        readonly ToolStripMenuItem _deafenItem;
         readonly MicController _mic;
         CoreWebView2Environment _env;
         bool _quitting;
 
-        // Wrapper-side mic state. live = toggle on OR a PTT key held.
+        // Wrapper-side audio state: micLive = toggle on OR a PTT key held;
+        // deafened mutes speakers AND the mic (hard block, like Discord).
         List<HotkeyBinding> _bindings = new List<HotkeyBinding>();
-        bool _toggleLive;
+        bool _micLive;
+        bool _deafened;
         readonly HashSet<int> _pttHeld = new HashSet<int>(); // RegisterHotKey ids
         readonly Dictionary<int, int> _registered = new Dictionary<int, int>(); // id -> binding index
         readonly System.Windows.Forms.Timer _pttTimer;
-        Icon _iconMuted, _iconLive, _iconPtt;
+        Icon _iconMuted, _iconDeafened, _iconLive, _iconPtt;
         [DllImport("user32.dll")]
         static extern bool DestroyIcon(IntPtr hIcon);
 
@@ -79,9 +83,11 @@ namespace DCTrayLite
             _web = new WebView2 { Dock = DockStyle.Fill };
             Controls.Add(_web);
 
-            // Mic state icons: red slash = wrapper muted, green = mic live,
+            // Mic state icons: red slash on dark = wrapper muted; red slash on
+            // dark red = deafened (mic + speakers); green = mic live;
             // bright green = push-to-talk held.
             _iconMuted = MakeStatusIcon(Color.FromArgb(0x2C, 0x2F, 0x33), 1f, true);
+            _iconDeafened = MakeStatusIcon(Color.FromArgb(0x5A, 0x1F, 0x1F), 1f, true);
             _iconLive = MakeStatusIcon(Color.FromArgb(0x3B, 0xA5, 0x5D), 1f, false);
             _iconPtt = MakeStatusIcon(Color.FromArgb(0x57, 0xF2, 0x87), 1f, false);
             _tray = new NotifyIcon
@@ -94,10 +100,16 @@ namespace DCTrayLite
             menu.Items.Add("Open " + cfg.Name, null, (s, e) => ShowApp());
             _muteItem = new ToolStripMenuItem("Unmute mic", null, (s, e) =>
             {
-                _toggleLive = !_toggleLive;
+                _micLive = !_micLive;
                 ApplyMicState();
             });
             menu.Items.Add(_muteItem);
+            _deafenItem = new ToolStripMenuItem("Deafen", null, (s, e) =>
+            {
+                _deafened = !_deafened;
+                ApplyMicState();
+            });
+            menu.Items.Add(_deafenItem);
             var startup = new ToolStripMenuItem("Start with Windows") { Checked = IsStartupEnabled() };
             startup.Click += (s, e) => { SetStartup(!startup.Checked); startup.Checked = IsStartupEnabled(); };
             menu.Items.Add(startup);
@@ -116,8 +128,8 @@ namespace DCTrayLite
             _tray.ContextMenuStrip = menu;
             _tray.DoubleClick += (s, e) => ShowApp();
 
-            // Take control of the mic: save its current state, then mute.
-            // On quit the saved state is restored.
+            // Take control of the mic and speakers: save current state, then
+            // mute the mic. On quit the saved state is restored.
             _mic = new MicController();
             if (_mic.Error != null)
             {
@@ -128,7 +140,7 @@ namespace DCTrayLite
             }
             else
             {
-                _mic.SetMuted(true);
+                _mic.SetMicMuted(true);
             }
 
             _bindings = LoadHotkeys();
@@ -144,9 +156,9 @@ namespace DCTrayLite
             {
                 try { _pttTimer.Stop(); } catch { }
                 UnregisterAllHotkeys();
-                try { _mic.Dispose(); } catch { } // restores the mic's prior state
+                try { _mic.Dispose(); } catch { } // restores mic + speaker prior state
                 _tray.Visible = false;
-                foreach (var ic in new[] { _iconMuted, _iconLive, _iconPtt })
+                foreach (var ic in new[] { _iconMuted, _iconDeafened, _iconLive, _iconPtt })
                     try { if (ic != null) DestroyIcon(ic.Handle); } catch { }
             };
 
@@ -189,9 +201,14 @@ namespace DCTrayLite
             int idx;
             if (!_registered.TryGetValue(id, out idx) || idx >= _bindings.Count) return;
             var b = _bindings[idx];
-            if (b.Action == HotkeyAction.Toggle)
+            if (b.Action == HotkeyAction.ToggleMute)
             {
-                _toggleLive = !_toggleLive;
+                _micLive = !_micLive;
+                ApplyMicState();
+            }
+            else if (b.Action == HotkeyAction.ToggleDeafen)
+            {
+                _deafened = !_deafened;
                 ApplyMicState();
             }
             else if (b.Action == HotkeyAction.PushToTalk)
@@ -229,9 +246,13 @@ namespace DCTrayLite
 
         void ApplyMicState()
         {
-            bool live = _toggleLive || _pttHeld.Count > 0;
-            _mic.SetMuted(!live);
-            _muteItem.Text = _toggleLive ? "Mute mic" : "Unmute mic";
+            // Deafen is a hard block: mic muted AND speakers muted, PTT
+            // doesn't override it (matches Discord semantics).
+            bool live = (_micLive || _pttHeld.Count > 0) && !_deafened;
+            _mic.SetMicMuted(!live);
+            _mic.SetSpeakersMuted(_deafened);
+            _muteItem.Text = _micLive ? "Mute mic" : "Unmute mic";
+            _deafenItem.Text = _deafened ? "Undeafen" : "Deafen";
             UpdateTrayIcon();
         }
 
@@ -377,11 +398,12 @@ namespace DCTrayLite
         {
             try
             {
-                bool live = _toggleLive || _pttHeld.Count > 0;
-                bool ptt = _pttHeld.Count > 0;
+                bool ptt = _pttHeld.Count > 0 && !_deafened;
+                bool live = (_micLive || ptt) && !_deafened;
                 Icon icon;
                 string state;
-                if (!live) { icon = _iconMuted; state = "mic muted"; }
+                if (_deafened) { icon = _iconDeafened; state = "deafened"; }
+                else if (!live) { icon = _iconMuted; state = "mic muted"; }
                 else if (ptt) { icon = _iconPtt; state = "talking (push-to-talk)"; }
                 else { icon = _iconLive; state = "mic live"; }
                 _tray.Icon = icon;
