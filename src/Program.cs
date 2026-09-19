@@ -8,6 +8,10 @@ namespace DCTrayLite
 {
     static class Program
     {
+        // Show-event for the single-instance handoff, created in Main while
+        // we hold the mutex. Lives for the whole process lifetime.
+        static EventWaitHandle _showEvent;
+
         [STAThread]
         static void Main()
         {
@@ -36,6 +40,14 @@ namespace DCTrayLite
             {
                 mutex = new Mutex(true, @"Local\PwaTray_" + tag, out createdNew);
             }
+            catch (AbandonedMutexException)
+            {
+                // Previous instance was killed (taskkill, crash) without
+                // releasing the mutex. It's signaled now — take ownership
+                // as the first instance instead of erroring out.
+                mutex = new Mutex(true, @"Local\PwaTray_" + tag, out createdNew);
+                createdNew = true;
+            }
             catch (Exception ex)
             {
                 MessageBox.Show("Could not start (single-instance check failed):\n" + ex.Message,
@@ -53,6 +65,19 @@ namespace DCTrayLite
                 try { mutex.Close(); } catch { }
                 return;
             }
+
+            // Create the show-event NOW, while we hold the mutex and before
+            // the main form exists — a second instance (e.g. a taskbar-pin
+            // click) can then always signal us, even mid-startup. Clear any
+            // stale signal left by a killed predecessor.
+            try
+            {
+                bool evNew;
+                _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset,
+                    @"Local\PwaTrayShow_" + tag, out evNew);
+                if (!evNew) _showEvent.Reset();
+            }
+            catch { _showEvent = null; }
 
             using (mutex)
             {
