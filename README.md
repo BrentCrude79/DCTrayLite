@@ -32,10 +32,12 @@ The one desktop-app feature worth keeping: **push-to-talk and mute toggles
 that work while the window isn't focused** — mid-game, in another app, anywhere.
 
 1. Right-click the tray icon → **Hotkeys…**
-2. Click **Set…** on a row and press the key you want (up to 3).
+2. Click **Set…** on a row, hold the keys together, then release.
+   Each hotkey can be a combo — e.g. Left Ctrl + Left Alt, or
+   Ctrl + Shift + M. Esc cancels. (Up to 3.)
 3. **Mark it as Push-to-talk** in the dropdown if it's a hold-to-talk key.
-4. In Discord itself, set the **same** keys: User Settings → Keybinds →
-   add *Push To Talk* / *Toggle Mute* with the same physical key.
+4. In Discord itself, set the **same** combos: User Settings → Keybinds →
+   add *Push To Talk* / *Toggle Mute* with the same physical keys.
 
 DCTrayLite only delivers the keystrokes — Discord decides what they do, so
 both sides have to agree on the key. Keys are never swallowed: they still
